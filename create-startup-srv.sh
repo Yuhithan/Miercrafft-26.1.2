@@ -7,7 +7,7 @@ set -euo pipefail
 # ============================================================
 
 # ---------- Variables ----------
-PACKAGES=("openjdk-25-jdk" "wget" "curl" "jq")
+PACKAGES=("openjdk-21-jdk" "wget" "curl" "jq")
 MC_VERSION="26.1.2"
 MC_DIR="${HOME}/minecraft"
 MC_JAR="server.jar"
