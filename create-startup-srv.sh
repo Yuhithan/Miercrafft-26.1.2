@@ -1,177 +1,409 @@
+```bash
 #!/usr/bin/env bash
+
 set -euo pipefail
 
 # ============================================================
-# Minecraft Fabric 26.1.2 + systemd installer
-# Debian / Ubuntu
+# Minecraft Fabric 26.1.2 Server Installer
+# Ubuntu 24.04
+#
+# Installs:
+#   - OpenJDK 25
+#   - wget
+#   - curl
+#   - jq
+#   - Fabric Server Launcher
+#
+# Creates:
+#   $HOME/minecraft/
+#   /etc/systemd/system/minecraft.service
 # ============================================================
 
-# ---------- Variables ----------
-PACKAGES=("openjdk-21-jdk" "wget" "curl" "jq")
+
+# ============================================================
+# VARIABLES
+# ============================================================
+
 MC_VERSION="26.1.2"
+
 MC_DIR="${HOME}/minecraft"
+
 MC_JAR="server.jar"
-FABRIC_INSTALLER="${MC_DIR}/fabric-installer.jar"
+
+FABRIC_JAR="${MC_DIR}/fabric-server.jar"
+
 SERVICE_NAME="minecraft"
+
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-# Change these if you want different RAM limits.
+# Change these if your machine has more/less RAM.
 MC_MIN_RAM="2G"
 MC_MAX_RAM="4G"
 
-# ---------- Colors ----------
+PACKAGES=(
+    openjdk-25-jdk
+    wget
+    curl
+    jq
+)
+
+
+# ============================================================
+# COLORS
+# ============================================================
+
 GREEN="\033[0;32m"
 YELLOW="\033[1;33m"
 RED="\033[0;31m"
-NC="\033[0m"
+CYAN="\033[0;36m"
+RESET="\033[0m"
 
-info() { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-# ---------- Root / real user ----------
-if [[ "${EUID}" -eq 0 ]]; then
-    if [[ -z "${SUDO_USER:-}" || "${SUDO_USER}" == "root" ]]; then
-        error "Run this script as your normal user with sudo access, not directly as root."
-        exit 1
-    fi
-    RUN_USER="${SUDO_USER}"
-else
-    RUN_USER="${USER}"
-fi
+# ============================================================
+# FUNCTIONS
+# ============================================================
 
-RUN_HOME="$(getent passwd "${RUN_USER}" | cut -d: -f6)"
-
-if [[ -z "${RUN_HOME}" ]]; then
-    error "Could not determine home directory for ${RUN_USER}."
-    exit 1
-fi
-
-# Keep the requested $HOME/minercaft/server.jar-style layout,
-# but use the actual user's home directory even when sudo is used.
-MC_DIR="${RUN_HOME}/minecraft"
-MC_JAR="server.jar"
-FABRIC_INSTALLER="${MC_DIR}/fabric-installer.jar"
-
-# ---------- Loading bar ----------
-loading_bar() {
-    local message="$1"
-    local i
-    printf "%s [" "$message"
-    for i in $(seq 1 30); do
-        printf "#"
-        sleep 0.03
-    done
-    printf "] 100%%\n"
+info() {
+    echo -e "${GREEN}[INFO]${RESET} $1"
 }
 
-# ---------- Check OS ----------
+warn() {
+    echo -e "${YELLOW}[WARN]${RESET} $1"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${RESET} $1"
+}
+
+loading_bar() {
+
+    local message="$1"
+
+    echo -ne "${CYAN}${message}${RESET} ["
+
+    for i in $(seq 1 30); do
+        echo -ne "#"
+        sleep 0.04
+    done
+
+    echo "] 100%"
+}
+
+
+# ============================================================
+# CHECK UBUNTU
+# ============================================================
+
 if [[ ! -f /etc/os-release ]]; then
-    error "Cannot detect Linux distribution."
+
+    error "Cannot detect operating system."
+
     exit 1
+
 fi
 
-. /etc/os-release
-if [[ "${ID:-}" != "debian" && "${ID_LIKE:-}" != *debian* ]]; then
-    warn "This script is intended for Debian/Ubuntu-based systems."
+source /etc/os-release
+
+
+if [[ "${ID}" != "ubuntu" ]]; then
+
+    warn "This script was designed specifically for Ubuntu 24.04."
+
 fi
 
-# ---------- Install packages ----------
-info "Updating APT..."
+
+if [[ "${VERSION_ID:-}" != "24.04" ]]; then
+
+    warn "Detected Ubuntu version: ${VERSION_ID:-unknown}"
+
+fi
+
+
+# ============================================================
+# CHECK USER
+# ============================================================
+
+if [[ "${EUID}" -eq 0 ]]; then
+
+    error "Do not run this script directly as root."
+
+    echo
+    echo "Run it as your normal user:"
+    echo
+    echo "  ./create-startup-srv.sh"
+    echo
+
+    exit 1
+
+fi
+
+
+if ! sudo -v; then
+
+    error "This script requires sudo privileges."
+
+    exit 1
+
+fi
+
+
+# ============================================================
+# APT UPDATE
+# ============================================================
+
+echo
+info "Updating APT package lists..."
+
 sudo apt update
 
-info "Installing required packages: ${PACKAGES[*]}"
-sudo apt install -y "${PACKAGES[@]}"
 
-# ---------- Verify Java ----------
-info "Checking Java..."
-JAVA_MAJOR="$(java -version 2>&1 | awk -F '"' '/version/ {print $2}' | cut -d. -f1 | head -n1)"
+# ============================================================
+# REMOVE OLD JAVA 21
+# ============================================================
 
-if [[ -z "${JAVA_MAJOR}" || "${JAVA_MAJOR}" -lt 25 ]]; then
-    error "Java 25 or newer is required. Detected: ${JAVA_MAJOR:-unknown}"
-    exit 1
+if dpkg -s openjdk-21-jdk >/dev/null 2>&1; then
+
+    info "Removing old OpenJDK 21..."
+
+    sudo apt remove -y openjdk-21-jdk
+
 fi
 
-info "Java OK: $(java -version 2>&1 | head -n1)"
 
-# ---------- Create server directory ----------
-info "Creating Minecraft directory: ${MC_DIR}"
-sudo -u "${RUN_USER}" mkdir -p "${MC_DIR}"
+# ============================================================
+# INSTALL PACKAGES
+# ============================================================
 
-# ---------- Download Fabric installer ----------
-info "Finding the latest Fabric installer..."
-FABRIC_INSTALLER_VERSION="$(
-    curl -fsSL "https://meta.fabricmc.net/v2/versions/installer" |
+echo
+info "Installing required packages:"
+echo
+
+for PACKAGE in "${PACKAGES[@]}"; do
+    echo "  - ${PACKAGE}"
+done
+
+echo
+
+sudo apt install -y "${PACKAGES[@]}"
+
+
+# ============================================================
+# SELECT JAVA 25
+# ============================================================
+
+info "Configuring Java 25..."
+
+JAVA25="/usr/lib/jvm/java-25-openjdk-amd64/bin/java"
+
+
+if [[ ! -x "${JAVA25}" ]]; then
+
+    error "Java 25 was not found at:"
+    echo "${JAVA25}"
+
+    echo
+    echo "Installed Java versions:"
+    update-alternatives --list java 2>/dev/null || true
+
+    exit 1
+
+fi
+
+
+# Make Java 25 the default Java command.
+sudo update-alternatives --set java "${JAVA25}"
+
+
+# ============================================================
+# VERIFY JAVA
+# ============================================================
+
+echo
+info "Checking Java version..."
+
+JAVA_VERSION="$("${JAVA25}" -version 2>&1 | head -n 1)"
+
+echo "${JAVA_VERSION}"
+
+
+JAVA_MAJOR="$(
+    "${JAVA25}" -version 2>&1 |
+    awk -F '"' '/version/ {print $2}' |
+    cut -d. -f1
+)"
+
+
+if [[ "${JAVA_MAJOR}" -lt 25 ]]; then
+
+    error "Java 25 or newer is required."
+
+    exit 1
+
+fi
+
+
+info "Java 25 detected successfully."
+
+
+# ============================================================
+# CREATE MINECRAFT DIRECTORY
+# ============================================================
+
+echo
+info "Creating Minecraft directory..."
+
+mkdir -p "${MC_DIR}"
+
+
+# ============================================================
+# GET LATEST FABRIC LOADER
+# ============================================================
+
+info "Getting Fabric Loader version..."
+
+FABRIC_LOADER="$(
+    curl -fsSL \
+    "https://meta.fabricmc.net/v2/versions/loader/${MC_VERSION}" |
+    jq -r 'map(select(.loader.stable == true))[0].loader.version'
+)"
+
+
+if [[ -z "${FABRIC_LOADER}" || "${FABRIC_LOADER}" == "null" ]]; then
+
+    error "Could not find a stable Fabric Loader for Minecraft ${MC_VERSION}."
+
+    exit 1
+
+fi
+
+
+info "Fabric Loader: ${FABRIC_LOADER}"
+
+
+# ============================================================
+# GET LATEST FABRIC INSTALLER
+# ============================================================
+
+info "Getting Fabric installer version..."
+
+FABRIC_INSTALLER="$(
+    curl -fsSL \
+    "https://meta.fabricmc.net/v2/versions/installer" |
     jq -r 'map(select(.stable == true))[0].version'
 )"
 
-if [[ -z "${FABRIC_INSTALLER_VERSION}" || "${FABRIC_INSTALLER_VERSION}" == "null" ]]; then
-    error "Could not determine a Fabric installer version."
+
+if [[ -z "${FABRIC_INSTALLER}" || "${FABRIC_INSTALLER}" == "null" ]]; then
+
+    error "Could not find a stable Fabric installer."
+
     exit 1
+
 fi
 
-FABRIC_INSTALLER_URL="https://maven.fabricmc.net/net/fabricmc/fabric-installer/${FABRIC_INSTALLER_VERSION}/fabric-installer-${FABRIC_INSTALLER_VERSION}.jar"
 
-info "Downloading Fabric installer ${FABRIC_INSTALLER_VERSION}..."
-sudo -u "${RUN_USER}" wget -q --show-progress \
-    -O "${FABRIC_INSTALLER}" \
-    "${FABRIC_INSTALLER_URL}"
+info "Fabric Installer: ${FABRIC_INSTALLER}"
 
-# ---------- Install Fabric server ----------
-info "Installing Fabric server for Minecraft ${MC_VERSION}..."
-sudo -u "${RUN_USER}" java -jar "${FABRIC_INSTALLER}" server \
-    -mcversion "${MC_VERSION}" \
-    -downloadMinecraft \
-    -dir "${MC_DIR}"
 
-# The Fabric installer creates fabric-server-launch.jar and downloads server.jar.
-if [[ ! -f "${MC_DIR}/fabric-server-launch.jar" ]]; then
-    error "Fabric server launcher was not created."
+# ============================================================
+# DOWNLOAD FABRIC SERVER LAUNCHER
+# ============================================================
+
+FABRIC_URL="https://meta.fabricmc.net/v2/versions/loader/${MC_VERSION}/${FABRIC_LOADER}/${FABRIC_INSTALLER}/server/jar"
+
+
+echo
+info "Downloading Fabric server launcher..."
+
+wget \
+    --show-progress \
+    -O "${FABRIC_JAR}" \
+    "${FABRIC_URL}"
+
+
+if [[ ! -f "${FABRIC_JAR}" ]]; then
+
+    error "Fabric server launcher download failed."
+
     exit 1
+
 fi
 
-if [[ ! -f "${MC_DIR}/${MC_JAR}" ]]; then
-    error "Minecraft ${MC_VERSION} server.jar was not downloaded."
+
+# ============================================================
+# CREATE SERVER JAR
+# ============================================================
+
+# The Fabric executable server launcher will download
+# the required Minecraft server files when first started.
+
+info "Fabric server launcher downloaded."
+
+
+# ============================================================
+# EULA
+# ============================================================
+
+echo
+warn "Minecraft EULA"
+
+echo
+echo "This installer will create eula.txt with:"
+echo
+echo "  eula=true"
+echo
+echo "Only continue if you agree to the Minecraft EULA."
+echo
+
+read -r -p "Do you agree to the Minecraft EULA? [y/N]: " EULA_REPLY
+
+if [[ ! "${EULA_REPLY}" =~ ^[Yy]$ ]]; then
+
+    error "EULA not accepted."
+
+    echo
+    echo "The installation has been stopped."
+
     exit 1
+
 fi
 
-# ---------- EULA ----------
-# Set this to true only if you agree to Minecraft's EULA.
-echo "eula=true" | sudo -u "${RUN_USER}" tee "${MC_DIR}/eula.txt" >/dev/null
 
-# ---------- Permissions ----------
-sudo chown -R "${RUN_USER}:${RUN_USER}" "${MC_DIR}"
+echo "eula=true" > "${MC_DIR}/eula.txt"
 
-# ---------- Remove installer after installation ----------
-rm -f "${FABRIC_INSTALLER}"
 
-# ---------- Create systemd service ----------
-info "Creating systemd service: ${SERVICE_FILE}"
+# ============================================================
+# CREATE SYSTEMD SERVICE
+# ============================================================
 
-sudo tee "${SERVICE_FILE}" >/dev/null <<EOF
+echo
+info "Creating systemd service..."
+
+sudo tee "${SERVICE_FILE}" > /dev/null <<EOF
 [Unit]
-Description=Minecraft Fabric Server ${MC_VERSION}
+Description=Minecraft Fabric ${MC_VERSION} Server
+Documentation=https://fabricmc.net/
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+
 Type=simple
-User=${RUN_USER}
-Group=${RUN_USER}
+
+User=${USER}
+Group=${USER}
+
 WorkingDirectory=${MC_DIR}
 
-# Fabric's server launcher starts the downloaded server.jar.
-ExecStart=/usr/bin/java -Xms${MC_MIN_RAM} -Xmx${MC_MAX_RAM} -jar ${MC_DIR}/fabric-server-launch.jar nogui
+ExecStart=${JAVA25} -Xms${MC_MIN_RAM} -Xmx${MC_MAX_RAM} -jar ${FABRIC_JAR} nogui
 
 Restart=on-failure
 RestartSec=10
-TimeoutStopSec=30
 
-# Give the server a normal environment.
-Environment="HOME=${RUN_HOME}"
-Environment="JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64"
+TimeoutStopSec=60
 
-# Make logs visible through journalctl.
+Environment="HOME=${HOME}"
+
 StandardOutput=journal
 StandardError=journal
 
@@ -179,44 +411,125 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-# ---------- systemd ----------
+
+# ============================================================
+# SYSTEMD RELOAD
+# ============================================================
+
+echo
 info "Reloading systemd..."
+
 sudo systemctl daemon-reload
 
+
+# ============================================================
+# ENABLE SERVICE
+# ============================================================
+
 info "Enabling Minecraft service..."
+
 sudo systemctl enable "${SERVICE_NAME}.service"
 
-info "Starting Minecraft..."
+
+# ============================================================
+# START SERVER
+# ============================================================
+
+echo
+info "Starting Minecraft server..."
+
 sudo systemctl restart "${SERVICE_NAME}.service"
 
-# ---------- Wait for startup ----------
+
+# ============================================================
+# LOADING BAR
+# ============================================================
+
 echo
-loading_bar "Waiting for Minecraft to start"
+loading_bar "Starting Minecraft server"
+
+
+# ============================================================
+# CHECK STATUS
+# ============================================================
+
+echo
+info "Checking Minecraft service..."
+
+sleep 3
 
 if sudo systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+
     echo
-    echo -e "${GREEN}============================================${NC}"
-    echo -e "${GREEN} Minecraft Fabric ${MC_VERSION} is RUNNING! ${NC}"
-    echo -e "${GREEN}============================================${NC}"
+    echo -e "${GREEN}==============================================${RESET}"
+    echo -e "${GREEN}       MINECRAFT SERVER IS RUNNING!          ${RESET}"
+    echo -e "${GREEN}==============================================${RESET}"
     echo
-    echo "Server directory : ${MC_DIR}"
-    echo "Minecraft JAR    : ${MC_DIR}/${MC_JAR}"
-    echo "Fabric launcher  : ${MC_DIR}/fabric-server-launch.jar"
-    echo "Service          : ${SERVICE_NAME}.service"
+
+    echo "Minecraft version : ${MC_VERSION}"
+    echo "Fabric Loader     : ${FABRIC_LOADER}"
+    echo "Java              : 25"
+    echo "Server directory  : ${MC_DIR}"
+    echo "Fabric launcher   : ${FABRIC_JAR}"
+    echo "RAM               : ${MC_MIN_RAM} - ${MC_MAX_RAM}"
     echo
+
+    echo "Systemd service:"
+    echo "  ${SERVICE_NAME}.service"
+    echo
+
     echo "Useful commands:"
-    echo "  sudo systemctl status ${SERVICE_NAME}"
-    echo "  sudo systemctl restart ${SERVICE_NAME}"
-    echo "  sudo systemctl stop ${SERVICE_NAME}"
-    echo "  sudo journalctl -u ${SERVICE_NAME} -f"
     echo
+    echo "  sudo systemctl status minecraft"
+    echo "  sudo systemctl restart minecraft"
+    echo "  sudo systemctl stop minecraft"
+    echo "  sudo systemctl start minecraft"
+    echo "  sudo journalctl -u minecraft -f"
+    echo
+
 else
+
     echo
-    error "Minecraft service failed to start."
+    error "Minecraft failed to start."
     echo
-    sudo systemctl status "${SERVICE_NAME}" --no-pager || true
+
+    echo "Systemd status:"
+    sudo systemctl status "${SERVICE_NAME}.service" --no-pager || true
+
     echo
-    echo "Recent logs:"
-    sudo journalctl -u "${SERVICE_NAME}" -n 50 --no-pager || true
+    echo "Recent Minecraft logs:"
+    sudo journalctl -u "${SERVICE_NAME}.service" -n 50 --no-pager || true
+
     exit 1
+
 fi
+
+
+# ============================================================
+# FINISHED
+# ============================================================
+
+echo
+echo -e "${GREEN}==============================================${RESET}"
+echo -e "${GREEN}          INSTALLATION COMPLETE              ${RESET}"
+echo -e "${GREEN}==============================================${RESET}"
+echo
+
+echo "Minecraft ${MC_VERSION} + Fabric is installed."
+echo "Java 25 is configured."
+echo "Systemd is configured."
+echo "The server is enabled at boot."
+echo "The server is currently running."
+
+echo
+echo "Server files:"
+echo "  ${MC_DIR}"
+
+echo
+echo "To watch the server:"
+echo
+echo "  sudo journalctl -u minecraft -f"
+
+echo
+echo "Done!"
+```
